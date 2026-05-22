@@ -701,6 +701,114 @@ class WitnessTests(unittest.TestCase):
                 server.RUNS_DIR = original_runs_dir
 
 
+class ObsReadinessTests(unittest.TestCase):
+    def test_wait_for_obs_retries_until_ready(self):
+        call_count = {"n": 0}
+
+        class FakeObs:
+            def get_version(self):
+                call_count["n"] += 1
+                if call_count["n"] < 3:
+                    raise Exception("Request GetVersion returned code 207. OBS is not ready.")
+                return mock.MagicMock(obs_version="32.0")
+
+        fake = FakeObs()
+        with mock.patch.object(server, "_get_obs", return_value=fake), \
+             mock.patch.object(server, "_open_obs"):
+            result = server._wait_for_obs(timeout_secs=5)
+
+        self.assertEqual(result, fake)
+        self.assertGreaterEqual(call_count["n"], 3)
+
+
+class ObsCaptureTests(unittest.TestCase):
+    def test_create_capture_source_recovers_from_already_exists(self):
+        class FakeObs:
+            def __init__(self):
+                self.create_calls = 0
+                self.settings_calls = 0
+
+            def create_input(self, **kwargs):
+                self.create_calls += 1
+                raise Exception("Request CreateInput returned code 601. With message: A source already exists by that input name.")
+
+            def set_input_settings(self, **kwargs):
+                self.settings_calls += 1
+
+        cl = FakeObs()
+        warnings = []
+        result = server._create_capture_source(cl, 12345, warnings)
+
+        self.assertTrue(result)
+        self.assertEqual(cl.settings_calls, 1)
+        self.assertFalse(server._has_capture_source_failure(warnings))
+
+    def test_create_capture_source_still_fails_on_other_errors(self):
+        class FakeObs:
+            def create_input(self, **kwargs):
+                raise Exception("Request CreateInput returned code 500. Something else.")
+
+        cl = FakeObs()
+        warnings = []
+        result = server._create_capture_source(cl, 12345, warnings)
+
+        self.assertFalse(result)
+
+    def test_remove_input_failure_logged_in_warnings(self):
+        class FakeObs:
+            def remove_input(self, name):
+                raise Exception("Cannot remove: not found")
+
+            def create_input(self, **kwargs):
+                pass
+
+            def create_scene(self, name):
+                pass
+
+            def set_current_program_scene(self, name):
+                pass
+
+            def get_input_list(self):
+                return None
+
+        cl = FakeObs()
+        warnings = server._ensure_obs_capture(cl, 12345, manage_profile=False)
+
+        remove_warnings = [w for w in warnings if "remove" in w.lower()]
+        self.assertTrue(len(remove_warnings) > 0)
+
+
+class WindowMatchTests(unittest.TestCase):
+    def test_find_window_prefers_owner_match_over_title_match(self):
+        fake_windows = [
+            {"id": 100, "owner": "Google Chrome", "title": "OrchidStudio/orchid PR #42"},
+            {"id": 200, "owner": "orchid", "title": "ORCHID"},
+        ]
+        with mock.patch.object(server, "_list_window_dicts", return_value=fake_windows):
+            result = server._find_window("orchid")
+
+        self.assertEqual(result["id"], 200)
+        self.assertEqual(result["owner"], "orchid")
+
+    def test_find_window_falls_back_to_title_match(self):
+        fake_windows = [
+            {"id": 100, "owner": "Google Chrome", "title": "Orchid Docs"},
+        ]
+        with mock.patch.object(server, "_list_window_dicts", return_value=fake_windows):
+            result = server._find_window("orchid")
+
+        self.assertEqual(result["id"], 100)
+
+    def test_find_window_returns_none_when_no_match(self):
+        fake_windows = [
+            {"id": 100, "owner": "Firefox", "title": "Homepage"},
+        ]
+        with mock.patch.object(server, "_list_window_dicts", return_value=fake_windows):
+            result = server._find_window("orchid")
+
+        self.assertIsNone(result)
+
+
 class LogPathTests(unittest.TestCase):
     def test_extra_logs_with_same_basename_get_unique_labels(self):
         with tempfile.TemporaryDirectory() as tmp:

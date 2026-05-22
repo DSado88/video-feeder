@@ -404,10 +404,22 @@ def _wait_for_obs(timeout_secs: float = 20.0):
     _open_obs()
     deadline = _now_epoch() + timeout_secs
     last_error: Exception | None = None
+    cl = None
     while _now_epoch() < deadline:
+        if cl is None:
+            try:
+                cl = _get_obs()
+            except Exception as exc:
+                last_error = exc
+                time.sleep(0.5)
+                continue
         try:
-            return _get_obs()
+            cl.get_version()
+            return cl
         except Exception as exc:
+            if "207" in str(exc):
+                time.sleep(0.5)
+                continue
             last_error = exc
             time.sleep(0.5)
     if last_error:
@@ -497,6 +509,29 @@ def _restore_obs_state(cl: Any, state: dict[str, Any] | None) -> None:
         _obs_try(cl, "set_current_program_scene", state["program_scene"], warnings=None)
 
 
+def _update_existing_source(cl: Any, window_id: int, warnings: list[str]) -> bool:
+    fn = getattr(cl, "set_input_settings", None)
+    if fn is None:
+        warnings.append("OBS WebSocket method unavailable: set_input_settings")
+        return False
+    settings = {"type": 1, "window": window_id, "show_cursor": True}
+    attempts = (
+        lambda: fn(QA_SOURCE, settings, True),
+        lambda: fn(input_name=QA_SOURCE, input_settings=settings, overlay=True),
+    )
+    for attempt in attempts:
+        try:
+            attempt()
+            return True
+        except TypeError:
+            continue
+        except Exception as exc:
+            warnings.append(f"OBS set_input_settings failed: {exc}")
+            return False
+    warnings.append("OBS set_input_settings: signature mismatch")
+    return False
+
+
 def _create_capture_source(cl: Any, window_id: int, warnings: list[str]) -> bool:
     fn = getattr(cl, "create_input", None)
     if fn is None:
@@ -529,10 +564,18 @@ def _create_capture_source(cl: Any, window_id: int, warnings: list[str]) -> bool
         except TypeError as exc:
             errors.append(str(exc))
         except Exception as exc:
+            if "601" in str(exc) or "already exists" in str(exc).lower():
+                _append_warning_dedup(warnings, f"OBS source {QA_SOURCE!r} already exists, updating settings")
+                return _update_existing_source(cl, window_id, warnings)
             warnings.append(f"OBS create_input failed: {exc}")
             return False
     warnings.append(f"OBS create_input signature mismatch: {' | '.join(errors)}")
     return False
+
+
+def _append_warning_dedup(warnings: list[str], message: str) -> None:
+    if message not in warnings:
+        warnings.append(message)
 
 
 def _has_capture_source_failure(warnings: list[str]) -> bool:
@@ -564,7 +607,7 @@ def _ensure_obs_capture(
 
     _obs_try(cl, "create_scene", QA_SCENE, warnings=None)
     _obs_try(cl, "set_current_program_scene", QA_SCENE, warnings=warnings)
-    _obs_try(cl, "remove_input", QA_SOURCE, warnings=None)
+    _obs_try(cl, "remove_input", QA_SOURCE, warnings=warnings)
     created = _create_capture_source(cl, window_id, warnings)
     if not created:
         warnings.append(f"Could not create OBS window capture source for window {window_id}")
@@ -598,11 +641,13 @@ def _list_window_dicts() -> list[dict[str, Any]]:
 
 def _find_window(window_match: str) -> dict[str, Any] | None:
     needle = window_match.lower()
+    title_match = None
     for window in _list_window_dicts():
-        haystack = f"{window['owner']} {window['title']}".lower()
-        if needle in haystack:
+        if needle in window["owner"].lower():
             return window
-    return None
+        if title_match is None and needle in window["title"].lower():
+            title_match = window
+    return title_match
 
 
 def _wait_for_window(window_match: str, timeout_secs: float = 30.0) -> dict[str, Any] | None:
