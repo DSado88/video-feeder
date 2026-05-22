@@ -378,6 +378,11 @@ def list_apps() -> str:
 # ---------------------------------------------------------------------------
 # OBS connection and setup
 # ---------------------------------------------------------------------------
+def _reset_obs() -> None:
+    global _obs
+    _obs = None
+
+
 def _get_obs():
     global _obs
     if _obs is None:
@@ -411,6 +416,7 @@ def _wait_for_obs(timeout_secs: float = 20.0):
                 cl = _get_obs()
             except Exception as exc:
                 last_error = exc
+                _reset_obs()
                 time.sleep(0.5)
                 continue
         try:
@@ -421,6 +427,8 @@ def _wait_for_obs(timeout_secs: float = 20.0):
                 time.sleep(0.5)
                 continue
             last_error = exc
+            _reset_obs()
+            cl = None
             time.sleep(0.5)
     if last_error:
         raise last_error
@@ -578,6 +586,37 @@ def _append_warning_dedup(warnings: list[str], message: str) -> None:
         warnings.append(message)
 
 
+def _fit_source_to_canvas(cl: Any, scene: str, source_name: str, warnings: list[str]) -> None:
+    vid = _obs_try(cl, "get_video_settings", warnings=warnings)
+    if vid is None:
+        return
+    canvas_w = float(_obs_attr(vid, "base_width", "baseWidth") or 1920)
+    canvas_h = float(_obs_attr(vid, "base_height", "baseHeight") or 1080)
+
+    items_resp = _obs_try(cl, "get_scene_item_list", scene, warnings=warnings)
+    if items_resp is None:
+        return
+    items = _response_items(items_resp, "scene_items", "sceneItems")
+    item_id = None
+    for item in items:
+        name = item.get("sourceName") or item.get("source_name") or ""
+        if name == source_name:
+            item_id = item.get("sceneItemId") or item.get("scene_item_id")
+            break
+    if item_id is None:
+        return
+
+    _obs_try(
+        cl, "set_scene_item_transform", scene, item_id, {
+            "boundsType": "OBS_BOUNDS_SCALE_INNER",
+            "boundsWidth": canvas_w,
+            "boundsHeight": canvas_h,
+            "boundsAlignment": 0,
+        },
+        warnings=warnings,
+    )
+
+
 def _has_capture_source_failure(warnings: list[str]) -> bool:
     return any(
         "capture source" in warning
@@ -609,7 +648,9 @@ def _ensure_obs_capture(
     _obs_try(cl, "set_current_program_scene", QA_SCENE, warnings=warnings)
     _obs_try(cl, "remove_input", QA_SOURCE, warnings=warnings)
     created = _create_capture_source(cl, window_id, warnings)
-    if not created:
+    if created:
+        _fit_source_to_canvas(cl, QA_SCENE, QA_SOURCE, warnings)
+    else:
         warnings.append(f"Could not create OBS window capture source for window {window_id}")
 
     _verify_mic(cl, warnings)

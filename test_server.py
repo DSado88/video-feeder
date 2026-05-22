@@ -754,6 +754,41 @@ class ObsCaptureTests(unittest.TestCase):
 
         self.assertFalse(result)
 
+    def test_fit_source_to_canvas_sets_bounds(self):
+        class FakeVideoSettings:
+            base_width = 1920
+            base_height = 1080
+
+        class FakeItems:
+            scene_items = [
+                {"sourceName": "VF Capture", "sceneItemId": 42},
+            ]
+
+        class FakeObs:
+            def __init__(self):
+                self.transform_calls = []
+
+            def get_video_settings(self):
+                return FakeVideoSettings()
+
+            def get_scene_item_list(self, scene):
+                return FakeItems()
+
+            def set_scene_item_transform(self, scene, item_id, transform):
+                self.transform_calls.append((scene, item_id, transform))
+
+        cl = FakeObs()
+        warnings = []
+        server._fit_source_to_canvas(cl, "Video Feeder", "VF Capture", warnings)
+
+        self.assertEqual(len(cl.transform_calls), 1)
+        scene, item_id, transform = cl.transform_calls[0]
+        self.assertEqual(scene, "Video Feeder")
+        self.assertEqual(item_id, 42)
+        self.assertEqual(transform["boundsType"], "OBS_BOUNDS_SCALE_INNER")
+        self.assertEqual(transform["boundsWidth"], 1920.0)
+        self.assertEqual(transform["boundsHeight"], 1080.0)
+
     def test_remove_input_failure_logged_in_warnings(self):
         class FakeObs:
             def remove_input(self, name):
