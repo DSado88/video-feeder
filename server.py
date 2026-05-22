@@ -1291,7 +1291,16 @@ def prepare_session(app_name: str, context: str = "") -> str:
         run_dir = _run_dir(run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        process, full_log = _start_app_process(app, run_dir)
+        existing_window = _find_window(str(app["window_match"]))
+        if existing_window:
+            logs_dir = run_dir / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            full_log = logs_dir / "app.full.log"
+            full_log.touch()
+            process = None
+        else:
+            process, full_log = _start_app_process(app, run_dir)
+
         logs = _configured_log_paths(app, full_log)
         manifest: dict[str, Any] = {
             "run_id": run_id,
@@ -1302,9 +1311,12 @@ def prepare_session(app_name: str, context: str = "") -> str:
             "app_name": app_name,
             "app": app,
             "logs": logs,
-            "app_process_pid": process.pid,
             "warnings": [],
         }
+        if process is not None:
+            manifest["app_process_pid"] = process.pid
+        else:
+            manifest["app_already_running"] = True
         _write_context(manifest, context)
 
         with _state_lock:
@@ -1330,10 +1342,11 @@ def prepare_session(app_name: str, context: str = "") -> str:
 
         _save_manifest(manifest)
         warning_text = "\n".join(f"- {w}" for w in manifest.get("warnings", []))
+        pid_line = f"App PID: {process.pid}" if process else "App: already running"
         return (
             f"Prepared Video Feeder run {run_id}\n"
             f"Run dir: {run_dir}\n"
-            f"App PID: {process.pid}\n"
+            f"{pid_line}\n"
             f"Next: start_capture(run_id={run_id!r})"
             + (f"\nWarnings:\n{warning_text}" if warning_text else "")
         )
