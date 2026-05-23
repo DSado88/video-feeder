@@ -225,7 +225,7 @@ def _latest_run_id(*, include_reported: bool = False) -> str | None:
         for manifest_path in RUNS_DIR.glob("*/manifest.json"):
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                if manifest.get("status") == "reported" and manifest.get("recording_path"):
+                if manifest.get("recording_path") or manifest.get("status") in ("reported", "analysis_failed", "stop_failed"):
                     candidates.append((manifest_path.stat().st_mtime, manifest["run_id"]))
             except Exception:
                 continue
@@ -1650,6 +1650,13 @@ def ask_witness(question: str, run_id: str = "") -> str:
     except (FileNotFoundError, ValueError) as exc:
         return f"Error: {exc}"
     recording_path = manifest.get("recording_path")
+    if not recording_path or not Path(recording_path).exists():
+        run_dir = _run_dir(resolved_run_id)
+        for ext in (".mp4", ".mov", ".webm", ".mkv"):
+            candidates = sorted(run_dir.glob(f"*{ext}"), key=lambda p: p.stat().st_size, reverse=True)
+            if candidates:
+                recording_path = str(candidates[0])
+                break
     if not recording_path or not Path(recording_path).exists():
         return (
             f"Error: run {resolved_run_id} has no recording file. "
