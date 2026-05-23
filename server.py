@@ -654,9 +654,9 @@ def _ensure_obs_capture(
         record_dir.mkdir(parents=True, exist_ok=True)
         _obs_try(cl, "set_record_directory", str(record_dir), warnings=warnings)
 
-    # Gemini rejects .mov — force mp4 output
+    # fragmented_mp4: crash-safe (moov atoms written periodically) + Gemini-compatible
     try:
-        cl.set_profile_parameter(category="SimpleOutput", name="RecFormat2", value="mp4")
+        cl.set_profile_parameter(category="SimpleOutput", name="RecFormat2", value="fragmented_mp4")
     except Exception:
         pass
 
