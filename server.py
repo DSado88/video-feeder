@@ -465,7 +465,10 @@ def _response_items(response: Any, *attrs: str) -> list[Any]:
     return []
 
 
-def _verify_mic(cl: Any, warnings: list[str]) -> None:
+QA_MIC = "VF Mic"
+
+
+def _ensure_mic(cl: Any, warnings: list[str]) -> None:
     response = _obs_try(cl, "get_input_list", warnings=warnings)
     if response is None:
         return
@@ -486,7 +489,14 @@ def _verify_mic(cl: Any, warnings: list[str]) -> None:
             if muted is False or muted is None:
                 found_unmuted = True
     if not found_audio:
-        warnings.append("No obvious OBS mic/audio input found; narration may not be captured")
+        try:
+            cl.create_input(
+                sceneName=QA_SCENE, inputName=QA_MIC,
+                inputKind="coreaudio_input_capture", inputSettings={},
+                sceneItemEnabled=True,
+            )
+        except Exception:
+            warnings.append("Could not create mic input; narration may not be captured")
     elif not found_unmuted:
         warnings.append("OBS audio inputs appear muted; narration may not be captured")
 
@@ -675,7 +685,7 @@ def _ensure_obs_capture(
     else:
         warnings.append(f"Could not create OBS window capture source for window {window_id}")
 
-    _verify_mic(cl, warnings)
+    _ensure_mic(cl, warnings)
     return warnings
 
 
