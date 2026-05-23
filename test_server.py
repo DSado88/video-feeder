@@ -225,10 +225,8 @@ class ManifestAndPromptTests(unittest.TestCase):
                 server._save_manifest(manifest)
                 server._active_sessions[run_id] = {"process": FakeProcess(), "status": "recording"}
 
-                fake_ref = {"name": "f", "uri": "gs://f", "mime_type": "video/mp4"}
                 with mock.patch.object(server, "_get_obs", return_value=FakeObs()), \
-                     mock.patch.object(server, "_upload_video", return_value=(fake_ref, "")), \
-                     mock.patch.object(server, "_query_gemini_with_ref", return_value="Gemini error: no key"):
+                     mock.patch.object(server, "_query_gemini_inline", return_value="Gemini error: no key"):
                     result = server.stop_and_analyze(run_id)
 
                 loaded = server._load_manifest(run_id)
@@ -276,10 +274,8 @@ class ManifestAndPromptTests(unittest.TestCase):
                 server._save_manifest(manifest)
                 server._active_sessions[run_id] = {"process": FakeProcess(), "status": "recording"}
 
-                fake_ref = {"name": "f", "uri": "gs://f", "mime_type": "video/mp4"}
                 with mock.patch.object(server, "_get_obs", return_value=FakeObs()), \
-                     mock.patch.object(server, "_upload_video", return_value=(fake_ref, "")), \
-                     mock.patch.object(server, "_query_gemini_with_ref", side_effect=RuntimeError("gemini exploded")):
+                     mock.patch.object(server, "_query_gemini_inline", side_effect=RuntimeError("gemini exploded")):
                     result = server.stop_and_analyze(run_id)
 
                 loaded = server._load_manifest(run_id)
@@ -308,13 +304,15 @@ class WitnessTests(unittest.TestCase):
                     "run_id": run_id,
                     "status": "reported",
                     "app": {"cwd": str(run_dir), "command": "true", "window_match": "Test"},
-                    "gemini_file_ref": {"name": "f", "uri": "gs://f", "mime_type": "video/mp4"},
+                    "recording_path": str(run_dir / "recording.mov"),
                     "witness_report_path": str(report),
                 }
                 server._save_manifest(manifest)
 
+                recording = run_dir / "recording.mov"
+                recording.write_text("fake video", encoding="utf-8")
                 with mock.patch.object(
-                    server, "_query_gemini_with_ref", return_value="The button was gray at 0:12."
+                    server, "_query_gemini_inline", return_value="The button was gray at 0:12."
                 ) as mock_query:
                     result = server.ask_witness("What color was the button at 0:12?", run_id=run_id)
 
@@ -340,20 +338,22 @@ class WitnessTests(unittest.TestCase):
                 run_id = "20260101T000000Z-seq"
                 run_dir = server._run_dir(run_id)
                 run_dir.mkdir(parents=True)
+                recording = run_dir / "recording.mov"
+                recording.write_text("fake", encoding="utf-8")
                 report = run_dir / "witness-report.md"
                 report.write_text("# Report\n\nStuff.\n", encoding="utf-8")
                 manifest = {
                     "run_id": run_id,
                     "status": "reported",
                     "app": {"cwd": str(run_dir), "command": "true", "window_match": "Test"},
-                    "gemini_file_ref": {"name": "f", "uri": "gs://f", "mime_type": "video/mp4"},
+                    "recording_path": str(recording),
                     "witness_report_path": str(report),
                 }
                 server._save_manifest(manifest)
 
-                with mock.patch.object(server, "_query_gemini_with_ref", return_value="Answer 1"):
+                with mock.patch.object(server, "_query_gemini_inline", return_value="Answer 1"):
                     server.ask_witness("Q1?", run_id=run_id)
-                with mock.patch.object(server, "_query_gemini_with_ref", return_value="Answer 2"):
+                with mock.patch.object(server, "_query_gemini_inline", return_value="Answer 2"):
                     result = server.ask_witness("Q2?", run_id=run_id)
 
                 self.assertIn("follow-up #2", result.lower())
@@ -373,13 +373,15 @@ class WitnessTests(unittest.TestCase):
                 run_id = "20260101T000000Z-race"
                 run_dir = server._run_dir(run_id)
                 run_dir.mkdir(parents=True)
+                recording = run_dir / "recording.mov"
+                recording.write_text("fake", encoding="utf-8")
                 report = run_dir / "witness-report.md"
                 report.write_text("# Report\n\nStuff.\n", encoding="utf-8")
                 manifest = {
                     "run_id": run_id,
                     "status": "reported",
                     "app": {"cwd": str(run_dir), "command": "true", "window_match": "Test"},
-                    "gemini_file_ref": {"name": "f", "uri": "gs://f", "mime_type": "video/mp4"},
+                    "recording_path": str(recording),
                     "witness_report_path": str(report),
                 }
                 server._save_manifest(manifest)
@@ -393,7 +395,7 @@ class WitnessTests(unittest.TestCase):
                         n = call_counter["n"]
                     return f"Answer {n}"
 
-                with mock.patch.object(server, "_query_gemini_with_ref", side_effect=fake_query):
+                with mock.patch.object(server, "_query_gemini_inline", side_effect=fake_query):
                     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
                         futures = [pool.submit(server.ask_witness, f"Q{i}?", run_id) for i in range(4)]
                         [f.result() for f in futures]
@@ -440,15 +442,13 @@ class WitnessTests(unittest.TestCase):
                 server._save_manifest(manifest)
                 server._active_sessions[run_id] = {"process": FakeProcess(), "status": "recording"}
 
-                fake_ref = {"name": "f", "uri": "gs://f", "mime_type": "video/mp4"}
                 with mock.patch.object(server, "_get_obs", return_value=FakeObs()), \
-                     mock.patch.object(server, "_upload_video", return_value=(fake_ref, "")), \
-                     mock.patch.object(server, "_query_gemini_with_ref", return_value="## Transcript\nOK"):
+                     mock.patch.object(server, "_query_gemini_inline", return_value="## Transcript\nOK"):
                     server.stop_and_analyze(run_id)
 
                 self.assertNotIn(run_id, server._active_sessions)
 
-                with mock.patch.object(server, "_query_gemini_with_ref", return_value="Yes."):
+                with mock.patch.object(server, "_query_gemini_inline", return_value="Yes."):
                     result = server.ask_witness("Was there an error?")
 
                 self.assertIn("Yes.", result)
@@ -463,7 +463,7 @@ class WitnessTests(unittest.TestCase):
         self.assertIn("Error", result)
         self.assertNotIn("Traceback", result)
 
-    def test_ask_witness_errors_without_file_ref(self):
+    def test_ask_witness_errors_without_recording(self):
         with tempfile.TemporaryDirectory() as tmp:
             original_runs_dir = server.RUNS_DIR
             server.RUNS_DIR = Path(tmp)
@@ -479,7 +479,7 @@ class WitnessTests(unittest.TestCase):
                 server._save_manifest(manifest)
 
                 result = server.ask_witness("What happened?", run_id=run_id)
-                self.assertIn("no uploaded video reference", result)
+                self.assertIn("no recording file", result)
             finally:
                 server.RUNS_DIR = original_runs_dir
 
@@ -518,15 +518,12 @@ class WitnessTests(unittest.TestCase):
                 server._save_manifest(manifest)
                 server._active_sessions[run_id] = {"process": FakeProcess(), "status": "recording"}
 
-                fake_ref = {"name": "files/abc", "uri": "gs://abc", "mime_type": "video/mp4"}
                 with mock.patch.object(server, "_get_obs", return_value=FakeObs()), \
-                     mock.patch.object(server, "_upload_video", return_value=(fake_ref, "")), \
-                     mock.patch.object(server, "_query_gemini_with_ref", return_value="## Transcript\nUser said hello."):
+                     mock.patch.object(server, "_query_gemini_inline", return_value="## Transcript\nUser said hello."):
                     result = server.stop_and_analyze(run_id)
 
                 loaded = server._load_manifest(run_id)
                 self.assertEqual(loaded["status"], "reported")
-                self.assertEqual(loaded["gemini_file_ref"], fake_ref)
                 self.assertIn("witness report ready", result)
                 self.assertIn("ask_witness", result)
                 self.assertIn("User said hello", result)
@@ -570,10 +567,8 @@ class WitnessTests(unittest.TestCase):
                 server._save_manifest(manifest)
                 server._active_sessions[run_id] = {"process": FakeProcess(), "status": "recording"}
 
-                fake_ref = {"name": "f", "uri": "gs://f", "mime_type": "video/mp4"}
                 with mock.patch.object(server, "_get_obs", return_value=FakeObs()), \
-                     mock.patch.object(server, "_upload_video", return_value=(fake_ref, "")), \
-                     mock.patch.object(server, "_query_gemini_with_ref", return_value="## Transcript\nOK"):
+                     mock.patch.object(server, "_query_gemini_inline", return_value="## Transcript\nOK"):
                     server.stop_and_analyze(run_id)
 
                 self.assertNotIn(run_id, server._active_sessions)
@@ -584,7 +579,7 @@ class WitnessTests(unittest.TestCase):
                 server._active_sessions.clear()
                 server._active_sessions.update(original_sessions)
 
-    def test_stop_and_analyze_persists_file_ref_before_query(self):
+    def test_stop_and_analyze_uses_inline_query(self):
         class FakeProcess:
             def poll(self):
                 return None
@@ -598,7 +593,7 @@ class WitnessTests(unittest.TestCase):
             original_sessions = dict(server._active_sessions)
             server.RUNS_DIR = Path(tmp)
             try:
-                run_id = "20260101T000000Z_persist"
+                run_id = "20260101T000000Z_inline"
                 run_dir = server._run_dir(run_id)
                 logs_dir = run_dir / "logs"
                 logs_dir.mkdir(parents=True)
@@ -619,64 +614,23 @@ class WitnessTests(unittest.TestCase):
                 server._save_manifest(manifest)
                 server._active_sessions[run_id] = {"process": FakeProcess(), "status": "recording"}
 
-                fake_ref = {"name": "files/abc", "uri": "gs://abc", "mime_type": "video/mp4"}
-                ref_saved_before_query = {}
+                inline_calls = []
 
-                def check_ref_persisted(_ref, _prompt):
-                    loaded = server._load_manifest(run_id)
-                    ref_saved_before_query["ref"] = loaded.get("gemini_file_ref")
-                    return "## Transcript\nOK"
+                def track_inline(path, prompt):
+                    inline_calls.append(path)
+                    return "## Transcript\nInline OK"
 
                 with mock.patch.object(server, "_get_obs", return_value=FakeObs()), \
-                     mock.patch.object(server, "_upload_video", return_value=(fake_ref, "")), \
-                     mock.patch.object(server, "_query_gemini_with_ref", side_effect=check_ref_persisted):
+                     mock.patch.object(server, "_query_gemini_inline", side_effect=track_inline):
                     server.stop_and_analyze(run_id)
 
-                self.assertEqual(ref_saved_before_query["ref"], fake_ref)
+                self.assertEqual(len(inline_calls), 1)
+                loaded = server._load_manifest(run_id)
+                self.assertEqual(loaded["status"], "reported")
             finally:
                 server.RUNS_DIR = original_runs_dir
                 server._active_sessions.clear()
                 server._active_sessions.update(original_sessions)
-
-    def test_stop_and_analyze_reuses_existing_file_ref_on_retry(self):
-        class FakeObs:
-            def remove_input(self, _name):
-                return None
-
-        with tempfile.TemporaryDirectory() as tmp:
-            original_runs_dir = server.RUNS_DIR
-            server.RUNS_DIR = Path(tmp)
-            try:
-                run_id = "20260101T000000Z_retry"
-                run_dir = server._run_dir(run_id)
-                run_dir.mkdir(parents=True)
-                recording = run_dir / "recording.mov"
-                recording.write_text("fake", encoding="utf-8")
-                existing_ref = {"name": "files/existing", "uri": "gs://existing", "mime_type": "video/mp4"}
-                manifest = {
-                    "run_id": run_id,
-                    "status": "analysis_failed",
-                    "run_dir": str(run_dir),
-                    "app": {"cwd": str(run_dir), "command": "true", "window_match": "Test"},
-                    "recording_path": str(recording),
-                    "capture_start_epoch": time.time() - 1,
-                    "capture_stop_epoch": time.time(),
-                    "obs_output_path": str(recording),
-                    "gemini_file_ref": existing_ref,
-                }
-                server._save_manifest(manifest)
-
-                with mock.patch.object(server, "_get_obs", return_value=FakeObs()), \
-                     mock.patch.object(server, "_upload_video") as mock_upload, \
-                     mock.patch.object(server, "_query_gemini_with_ref", return_value="## Transcript\nRetry OK"):
-                    server.stop_and_analyze(run_id)
-
-                mock_upload.assert_not_called()
-                loaded = server._load_manifest(run_id)
-                self.assertEqual(loaded["gemini_file_ref"], existing_ref)
-                self.assertEqual(loaded["status"], "reported")
-            finally:
-                server.RUNS_DIR = original_runs_dir
 
     def test_witness_prompt_used_in_evidence_prompt(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -789,10 +743,59 @@ class ObsCaptureTests(unittest.TestCase):
         self.assertEqual(transform["boundsWidth"], 1920.0)
         self.assertEqual(transform["boundsHeight"], 1080.0)
 
-    def test_remove_input_failure_logged_in_warnings(self):
+    def test_reuses_existing_source_when_window_matches(self):
+        class FakeInputSettings:
+            input_settings = {"window": 12345}
+
         class FakeObs:
+            def __init__(self):
+                self.removed = False
+                self.created = False
+
+            def get_input_settings(self, name):
+                return FakeInputSettings()
+
             def remove_input(self, name):
-                raise Exception("Cannot remove: not found")
+                self.removed = True
+
+            def create_input(self, **kwargs):
+                self.created = True
+
+            def create_scene(self, name):
+                pass
+
+            def set_current_program_scene(self, name):
+                pass
+
+            def get_video_settings(self):
+                return None
+
+            def get_input_list(self):
+                return None
+
+        cl = FakeObs()
+        warnings = server._ensure_obs_capture(cl, 12345, manage_profile=False)
+
+        self.assertFalse(cl.removed, "Should not remove source when window matches")
+        self.assertFalse(cl.created, "Should not recreate source when window matches")
+
+    def test_updates_existing_source_when_window_differs(self):
+        class FakeInputSettings:
+            input_settings = {"window": 99999}
+
+        class FakeObs:
+            def __init__(self):
+                self.removed = False
+                self.updated = False
+
+            def get_input_settings(self, name):
+                return FakeInputSettings()
+
+            def set_input_settings(self, **kwargs):
+                self.updated = True
+
+            def remove_input(self, name):
+                self.removed = True
 
             def create_input(self, **kwargs):
                 pass
@@ -803,21 +806,24 @@ class ObsCaptureTests(unittest.TestCase):
             def set_current_program_scene(self, name):
                 pass
 
+            def get_video_settings(self):
+                return None
+
             def get_input_list(self):
                 return None
 
         cl = FakeObs()
         warnings = server._ensure_obs_capture(cl, 12345, manage_profile=False)
 
-        remove_warnings = [w for w in warnings if "remove" in w.lower()]
-        self.assertTrue(len(remove_warnings) > 0)
+        self.assertTrue(cl.updated, "Should update settings when window differs")
+        self.assertFalse(cl.removed, "Should not remove source when updating")
 
 
 class WindowMatchTests(unittest.TestCase):
     def test_find_window_prefers_owner_match_over_title_match(self):
         fake_windows = [
-            {"id": 100, "owner": "Google Chrome", "title": "OrchidStudio/orchid PR #42"},
-            {"id": 200, "owner": "orchid", "title": "ORCHID"},
+            {"id": 100, "owner": "Google Chrome", "title": "OrchidStudio/orchid PR #42", "width": 1200, "height": 800},
+            {"id": 200, "owner": "orchid", "title": "ORCHID", "width": 1200, "height": 800},
         ]
         with mock.patch.object(server, "_list_window_dicts", return_value=fake_windows):
             result = server._find_window("orchid")
@@ -827,16 +833,26 @@ class WindowMatchTests(unittest.TestCase):
 
     def test_find_window_falls_back_to_title_match(self):
         fake_windows = [
-            {"id": 100, "owner": "Google Chrome", "title": "Orchid Docs"},
+            {"id": 100, "owner": "Google Chrome", "title": "Orchid Docs", "width": 1200, "height": 800},
         ]
         with mock.patch.object(server, "_list_window_dicts", return_value=fake_windows):
             result = server._find_window("orchid")
 
         self.assertEqual(result["id"], 100)
 
+    def test_find_window_skips_tiny_windows(self):
+        fake_windows = [
+            {"id": 100, "owner": "orchid", "title": "Window", "width": 66, "height": 20},
+            {"id": 200, "owner": "orchid", "title": "ORCHID", "width": 1200, "height": 800},
+        ]
+        with mock.patch.object(server, "_list_window_dicts", return_value=fake_windows):
+            result = server._find_window("orchid")
+
+        self.assertEqual(result["id"], 200)
+
     def test_find_window_returns_none_when_no_match(self):
         fake_windows = [
-            {"id": 100, "owner": "Firefox", "title": "Homepage"},
+            {"id": 100, "owner": "Firefox", "title": "Homepage", "width": 1200, "height": 800},
         ]
         with mock.patch.object(server, "_list_window_dicts", return_value=fake_windows):
             result = server._find_window("orchid")

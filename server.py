@@ -225,7 +225,7 @@ def _latest_run_id(*, include_reported: bool = False) -> str | None:
         for manifest_path in RUNS_DIR.glob("*/manifest.json"):
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                if manifest.get("status") == "reported" and manifest.get("gemini_file_ref"):
+                if manifest.get("status") == "reported" and manifest.get("recording_path"):
                     candidates.append((manifest_path.stat().st_mtime, manifest["run_id"]))
             except Exception:
                 continue
@@ -351,7 +351,7 @@ def _load_apps_config(path: Path = CONFIG_PATH) -> dict[str, dict[str, Any]]:
 
 @mcp.tool()
 def list_apps() -> str:
-    """List configured QA apps from ~/.config/video-feeder/apps.json."""
+    """List configured apps. Pass an app name to prepare_session() to start recording it."""
     try:
         apps = _load_apps_config()
     except Exception as exc:
@@ -391,7 +391,7 @@ def _get_obs():
         host = os.environ.get("OBS_WEBSOCKET_HOST", "localhost")
         port = int(os.environ.get("OBS_WEBSOCKET_PORT", "4455"))
         password = os.environ.get("OBS_WEBSOCKET_PASSWORD", "")
-        _obs = obs.ReqClient(host=host, port=port, password=password)
+        _obs = obs.ReqClient(host=host, port=port, password=password, timeout=10)
     return _obs
 
 
@@ -644,11 +644,33 @@ def _ensure_obs_capture(
         record_dir.mkdir(parents=True, exist_ok=True)
         _obs_try(cl, "set_record_directory", str(record_dir), warnings=warnings)
 
+    # Gemini rejects .mov — force mp4 output
+    try:
+        cl.set_profile_parameter(category="SimpleOutput", name="RecFormat2", value="mp4")
+    except Exception:
+        pass
+
     _obs_try(cl, "create_scene", QA_SCENE, warnings=None)
     _obs_try(cl, "set_current_program_scene", QA_SCENE, warnings=warnings)
-    _obs_try(cl, "remove_input", QA_SOURCE, warnings=warnings)
-    created = _create_capture_source(cl, window_id, warnings)
-    if created:
+
+    # Reuse existing source if it already targets the right window
+    existing_ok = False
+    try:
+        cur = cl.get_input_settings(QA_SOURCE)
+        cur_window = (cur.input_settings or {}).get("window")
+        if cur_window == window_id:
+            existing_ok = True
+        else:
+            existing_ok = _update_existing_source(cl, window_id, warnings)
+    except Exception:
+        # Source doesn't exist yet — create it
+        pass
+
+    if not existing_ok:
+        _obs_try(cl, "remove_input", QA_SOURCE, warnings=warnings)
+        existing_ok = _create_capture_source(cl, window_id, warnings)
+
+    if existing_ok:
         _fit_source_to_canvas(cl, QA_SCENE, QA_SOURCE, warnings)
     else:
         warnings.append(f"Could not create OBS window capture source for window {window_id}")
@@ -675,20 +697,34 @@ def _list_window_dicts() -> list[dict[str, Any]]:
         owner = window.get("kCGWindowOwnerName", "")
         title = window.get("kCGWindowName", "")
         window_id = window.get("kCGWindowNumber", 0)
+        bounds = window.get("kCGWindowBounds", {})
         if title and owner not in skip:
-            result.append({"id": window_id, "owner": owner, "title": title})
+            result.append({
+                "id": window_id,
+                "owner": owner,
+                "title": title,
+                "width": int(bounds.get("Width", 0)),
+                "height": int(bounds.get("Height", 0)),
+            })
     return result
 
 
+MIN_WINDOW_AREA = 10000  # skip tiny helper/tooltip windows
+
 def _find_window(window_match: str) -> dict[str, Any] | None:
     needle = window_match.lower()
+    owner_match = None
     title_match = None
     for window in _list_window_dicts():
+        area = window.get("width", 0) * window.get("height", 0)
+        if area < MIN_WINDOW_AREA:
+            continue
         if needle in window["owner"].lower():
-            return window
-        if title_match is None and needle in window["title"].lower():
+            if owner_match is None:
+                owner_match = window
+        elif title_match is None and needle in window["title"].lower():
             title_match = window
-    return title_match
+    return owner_match or title_match
 
 
 def _wait_for_window(window_match: str, timeout_secs: float = 30.0) -> dict[str, Any] | None:
@@ -703,7 +739,7 @@ def _wait_for_window(window_match: str, timeout_secs: float = 30.0) -> dict[str,
 
 @mcp.tool()
 def list_windows() -> str:
-    """List all capturable windows on screen."""
+    """List all capturable windows. For recording, prefer prepare_session(app_name) instead of picking a window manually."""
     try:
         windows = _list_window_dicts()
     except Exception as exc:
@@ -711,7 +747,7 @@ def list_windows() -> str:
 
     if not windows:
         return "No capturable windows found."
-    return "\n".join(f"{w['id']} | {w['owner']} | {w['title']}" for w in windows)
+    return "\n".join(f"{w['id']} | {w['owner']} | {w['title']} | {w['width']}x{w['height']}" for w in windows)
 
 
 # ---------------------------------------------------------------------------
@@ -1163,8 +1199,11 @@ def _upload_video(path: Path) -> tuple[dict[str, str] | None, str]:
     if err:
         return None, f"Gemini error: {err}"
 
+    mime_types = {".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+                  ".avi": "video/x-msvideo", ".mkv": "video/x-matroska", ".m4v": "video/x-m4v"}
+    mime = mime_types.get(path.suffix.lower(), "video/mp4")
     try:
-        video_file = client.files.upload(file=path)
+        video_file = client.files.upload(file=path, config={"mime_type": mime})
     except Exception as exc:
         return None, f"Gemini error: video upload failed: {exc}"
 
@@ -1187,6 +1226,30 @@ def _upload_video(path: Path) -> tuple[dict[str, str] | None, str]:
         "mime_type": video_file.mime_type,
     }
     return file_ref, ""
+
+
+VIDEO_MIMES = {".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+               ".avi": "video/x-msvideo", ".mkv": "video/x-matroska", ".m4v": "video/x-m4v"}
+
+
+def _query_gemini_inline(path: Path, prompt: str) -> str:
+    """Send video/image bytes inline to Gemini (no File API)."""
+    client, err = _get_gemini()
+    if err:
+        return f"Gemini error: {err}"
+
+    mime = VIDEO_MIMES.get(path.suffix.lower()) or IMAGE_MIMES.get(path.suffix.lower(), "video/mp4")
+    content_part = types.Part.from_bytes(data=path.read_bytes(), mime_type=mime)
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[content_part, prompt],
+        )
+    except Exception as exc:
+        return f"Gemini error: content generation failed: {exc}"
+    if not response.text:
+        return "Gemini error: response contained no text"
+    return response.text
 
 
 def _query_gemini_with_ref(file_ref: dict[str, str], prompt: str) -> str:
@@ -1212,11 +1275,8 @@ def _query_gemini_with_ref(file_ref: dict[str, str], prompt: str) -> str:
 
 
 def _upload_video_and_analyze(path: Path, prompt: str) -> str:
-    """Upload + single-shot query. Used by legacy analyze_bug flow."""
-    file_ref, err = _upload_video(path)
-    if err:
-        return err
-    return _query_gemini_with_ref(file_ref, prompt)
+    """Analyze a video: try inline first, fall back to File API for large files."""
+    return _query_gemini_inline(path, prompt)
 
 
 def _is_analysis_error(analysis: str) -> bool:
@@ -1279,7 +1339,14 @@ def _auto_stop_capture(run_id: str, max_seconds: int) -> None:
 # ---------------------------------------------------------------------------
 @mcp.tool()
 def prepare_session(app_name: str, context: str = "") -> str:
-    """Launch a configured app, prepare OBS capture, and create a QA run."""
+    """Preferred way to record an app. Call list_apps() to see app names.
+
+    This is step 1 of the QA workflow:
+      1. prepare_session(app_name) — launches app + OBS, sets up capture
+      2. start_capture(run_id)     — begins recording
+      3. stop_and_analyze(run_id)  — stops recording, Gemini analyzes video
+      4. ask_witness(question)     — follow-up questions about the video
+    """
     try:
         apps = _load_apps_config()
         if app_name not in apps:
@@ -1356,7 +1423,7 @@ def prepare_session(app_name: str, context: str = "") -> str:
 
 @mcp.tool()
 def start_capture(run_id: str = "", max_seconds: int = DEFAULT_CAPTURE_MAX_SECONDS) -> str:
-    """Start OBS recording and mark the evidence start boundary for a QA run."""
+    """Step 2: start recording. Call prepare_session() first to get the run_id."""
     if max_seconds < 1:
         return f"Error: max_seconds must be positive, got {max_seconds}"
     try:
@@ -1429,7 +1496,7 @@ def start_capture(run_id: str = "", max_seconds: int = DEFAULT_CAPTURE_MAX_SECON
 
 @mcp.tool()
 def stop_and_analyze(run_id: str = "", context: str = "") -> str:
-    """Stop a QA run and analyze it, or stop a legacy raw OBS recording if no run exists."""
+    """Step 3: stop recording and get Gemini witness report. Run_id is optional if only one session active."""
     if run_id:
         try:
             resolved_run_id = _validate_run_id(run_id)
@@ -1527,33 +1594,9 @@ def stop_and_analyze(run_id: str = "", context: str = "") -> str:
                 f"Error: {exc}"
             )
 
-        file_ref = manifest.get("gemini_file_ref")
-        if not file_ref:
-            try:
-                file_ref, upload_err = _upload_video(recording_path)
-            except Exception as exc:
-                upload_err = f"Gemini error: upload failed: {exc}"
-                file_ref = None
-            if upload_err:
-                analysis_path = _run_dir(resolved_run_id) / "witness-report.md"
-                analysis_path.write_text(f"# Witness Report\n\n{upload_err}\n", encoding="utf-8")
-                manifest["analysis_path"] = str(analysis_path)
-                manifest["status"] = "analysis_failed"
-                _set_active_status(resolved_run_id, "analysis_failed")
-                _release_active_session(manifest)
-                _save_manifest(manifest)
-                return (
-                    f"Run {resolved_run_id} captured, but upload failed.\n"
-                    f"Run dir: {_run_dir(resolved_run_id)}\n"
-                    f"Recording: {recording_path}\n\n"
-                    f"{upload_err}"
-                )
-            manifest["gemini_file_ref"] = file_ref
-            _save_manifest(manifest)
-
         prompt = _build_evidence_prompt(manifest)
         try:
-            witness_report = _query_gemini_with_ref(file_ref, prompt)
+            witness_report = _query_gemini_inline(recording_path, prompt)
         except Exception as exc:
             witness_report = f"Gemini error: witness query failed: {exc}"
         analysis_path = _run_dir(resolved_run_id) / "witness-report.md"
@@ -1590,21 +1633,16 @@ def stop_and_analyze(run_id: str = "", context: str = "") -> str:
 
 @mcp.tool()
 def ask_witness(question: str, run_id: str = "") -> str:
-    """Ask a follow-up question about a recorded QA session.
-
-    Gemini re-examines the same video to answer. Use this to ask about
-    specific moments, clarify what was on screen, or get details the
-    initial witness report didn't cover. The video is NOT re-uploaded.
-    """
+    """Step 4: ask follow-up questions about the video. Gemini re-watches without re-uploading."""
     try:
         resolved_run_id = _resolve_run_id(run_id, include_reported=True)
         manifest = _load_manifest(resolved_run_id)
     except (FileNotFoundError, ValueError) as exc:
         return f"Error: {exc}"
-    file_ref = manifest.get("gemini_file_ref")
-    if not file_ref:
+    recording_path = manifest.get("recording_path")
+    if not recording_path or not Path(recording_path).exists():
         return (
-            f"Error: run {resolved_run_id} has no uploaded video reference. "
+            f"Error: run {resolved_run_id} has no recording file. "
             f"Run stop_and_analyze first to generate a witness report."
         )
 
@@ -1621,7 +1659,7 @@ def ask_witness(question: str, run_id: str = "") -> str:
     )
 
     try:
-        answer = _query_gemini_with_ref(file_ref, prompt)
+        answer = _query_gemini_inline(Path(recording_path), prompt)
     except Exception as exc:
         return f"Error querying witness: {exc}"
 
@@ -1649,31 +1687,31 @@ def ask_witness(question: str, run_id: str = "") -> str:
 
 @mcp.tool()
 def qa_prepare(app_name: str, context: str = "") -> str:
-    """Slash-command friendly wrapper for /qa prepare <app>."""
+    """Step 1: prepare a QA session. Same as prepare_session(). Use list_apps() to see app names."""
     return prepare_session(app_name=app_name, context=context)
 
 
 @mcp.tool()
 def qa_record(run_id: str = "", max_seconds: int = DEFAULT_CAPTURE_MAX_SECONDS) -> str:
-    """Slash-command friendly wrapper for /qa record."""
+    """Step 2: start recording. Same as start_capture()."""
     return start_capture(run_id=run_id, max_seconds=max_seconds)
 
 
 @mcp.tool()
 def qa_stop(run_id: str = "", context: str = "") -> str:
-    """Slash-command friendly wrapper for /qa stop."""
+    """Step 3: stop recording and analyze. Same as stop_and_analyze()."""
     return stop_and_analyze(run_id=run_id, context=context)
 
 
 @mcp.tool()
 def qa_ask(question: str, run_id: str = "") -> str:
-    """Slash-command friendly wrapper for /qa ask <question>."""
+    """Step 4: ask follow-up questions about the video. Same as ask_witness()."""
     return ask_witness(question=question, run_id=run_id)
 
 
 @mcp.tool()
 def qa_analyze(file_path: str, context: str = "") -> str:
-    """Slash-command friendly wrapper for /qa analyze <path>."""
+    """Analyze an existing video/screenshot file without recording. Same as analyze_bug()."""
     return analyze_bug(file_path=file_path, context=context)
 
 
@@ -1682,7 +1720,7 @@ def qa_analyze(file_path: str, context: str = "") -> str:
 # ---------------------------------------------------------------------------
 @mcp.tool()
 def start_recording(window_id: int = 0, window_name: str = "") -> str:
-    """Start a simple OBS recording of a window without a QA session."""
+    """Legacy: raw OBS recording by window ID. Prefer prepare_session() for the full QA workflow."""
     if not window_id and window_name:
         try:
             window = _find_window(window_name)
@@ -1741,7 +1779,7 @@ def _stop_raw_and_analyze(context: str = "") -> str:
 
 @mcp.tool()
 def analyze_bug(file_path: str, context: str = "") -> str:
-    """Analyze an existing screen recording or screenshot of a bug."""
+    """Analyze an existing video/screenshot file. For live recording, use prepare_session() instead."""
     client, err = _get_gemini()
     if err:
         return f"Error: {err}"
